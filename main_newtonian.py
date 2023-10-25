@@ -8,7 +8,7 @@ import torch
 from torch import nn, optim
 from newtonian.dataset4newton import NBodyDataset
 from newtonian.gnn import GNN, RF_vel
-from newtonian.egnn import EGNN, EGNN_vel
+from newtonian.egnn import EGNN, EGNN_vel, EGNN_vel_wl
 from newtonian.clof import ClofNet, ClofNet_vel, ClofNet_vel_gbf
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
@@ -36,7 +36,7 @@ parser.add_argument('--lr', type=float, default=5e-4, metavar='N',
 parser.add_argument('--nf', type=int, default=64, metavar='N',
                     help='learning rate')
 parser.add_argument('--model', type=str, default='egnn_vel', metavar='N',
-                    help='available models: gnn, baseline, linear, linear_vel, se3_transformer, egnn_vel, rf_vel, tfn')
+                    help='available models: gnn, baseline, linear, linear_vel, se3_transformer, egnn_vel, rf_vel, tfn, egnn_vel_wl')
 parser.add_argument('--attention', type=int, default=0, metavar='N',
                     help='attention in the ae model')
 parser.add_argument('--n_layers', type=int, default=4, metavar='N',
@@ -61,6 +61,8 @@ parser.add_argument('--LR_decay', type=eval, default=False, metavar='N',
                     help='LR_decay')
 parser.add_argument('--decay', type=float, default=0.1, metavar='N',
                     help='learning rate decay')
+parser.add_argument('--clip', type=float, default=1.5, metavar='N',
+                    help='grad clip')
 
 time_exp_dic = {'time': 0, 'counter': 0}
 args = parser.parse_args()
@@ -120,6 +122,8 @@ def main():
         model = EGNN(in_node_nf=1, in_edge_nf=2, hidden_nf=args.nf, device='cpu', n_layers=args.n_layers)
     elif args.model == 'egnn_vel':
         model = EGNN_vel(in_node_nf=1, in_edge_nf=2, hidden_nf=args.nf, device=device, n_layers=args.n_layers, recurrent=True, norm_diff=args.norm_diff, tanh=args.tanh)
+    elif args.model == 'egnn_vel_wl':
+        model = EGNN_vel_wl(in_node_nf=1, in_edge_nf=2, hidden_nf=args.nf, device=device, n_layers=args.n_layers, recurrent=True, norm_diff=args.norm_diff, tanh=args.tanh)
     elif args.model == 'rf_vel':
         model = RF_vel(hidden_nf=args.nf, edge_attr_nf=2, device=device, act_fn=nn.SiLU(), n_layers=args.n_layers)
     elif args.model == 'clof':
@@ -206,6 +210,12 @@ def train(model, optimizer, epoch, loader, backprop=True):
             loc_dist = torch.sum((loc[rows] - loc[cols])**2, 1).unsqueeze(1)  # relative distances among locations
             edge_attr = torch.cat([edge_attr, loc_dist], 1).detach()  # concatenate all edge properties
             loc_pred = model(nodes, loc.detach(), edges, vel, edge_attr)
+        elif args.model == 'egnn_vel_wl':
+            nodes = torch.sqrt(torch.sum(vel ** 2, dim=1)).unsqueeze(1).detach()
+            rows, cols = edges
+            loc_dist = torch.sum((loc[rows] - loc[cols])**2, 1).unsqueeze(1)  # relative distances among locations
+            edge_attr = torch.cat([edge_attr, loc_dist], 1).detach()  # concatenate all edge properties
+            loc_pred = model(nodes, loc.detach(), edges, vel, edge_attr, batch_size, n_nodes)        
         elif args.model == 'rf_vel':
             rows, cols = edges
             vel_norm = torch.sqrt(torch.sum(vel ** 2, dim=1).unsqueeze(1)).detach()
@@ -232,6 +242,7 @@ def train(model, optimizer, epoch, loader, backprop=True):
         loss = loss_mse(loc_pred, loc_end)
         if backprop:
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), args.clip, norm_type=2.0)
             optimizer.step()
         res['loss'] += loss.item()*batch_size
         res['counter'] += batch_size
